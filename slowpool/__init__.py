@@ -2,9 +2,12 @@
 until the job is actually running. I need it because reasons.
 
 Due to this behavior, Futures can't be cancelled, and there is no need
-to check if they are running. 
+to check if they've started. They have.
 """
+import functools
 import queue
+import shutil
+import time
 import threading
 
 kill = object()
@@ -42,7 +45,7 @@ def worker(jobs: queue.Queue):
             future.q.put(None)
 
 
-def _yield_complete(futures):
+def yield_complete(futures):
     """has side effects on the futures list"""
     prune = []
     for i, future in enumerate(futures):
@@ -78,9 +81,9 @@ class Pool:
         futures = []
         for item in iterable:
             futures.append(self.submit(fn, item))
-            yield from _yield_complete(futures)
+            yield from yield_complete(futures)
         while futures:
-            yield from _yield_complete(futures)
+            yield from yield_complete(futures)
 
     def empty(self):
         while self.workers:
@@ -94,3 +97,33 @@ class Pool:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.empty()
+
+
+def needs_space(func=None, space=0.5):
+    if func is None:
+        return functools.partial(needs_space, space=space)
+
+    lock = threading.Semaphore()
+    reserved_space = 0.0  # reserved_space in GB
+
+    def get_space():
+        lock.acquire()
+        nonlocal reserved_space
+        while reserved_space + 1.5 > shutil.disk_usage(".").free / (1024 ** 3):
+            time.sleep(0.3)
+        reserved_space += space
+        lock.release()
+
+    def free_space():
+        nonlocal reserved_space
+        reserved_space -= space
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        get_space()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            free_space()
+
+    return wrapper

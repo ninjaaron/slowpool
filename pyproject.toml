@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "slowpool"
-version = "0.1.0"
+version = "0.1.1"
 description = ""
 authors = ["Aaron Christianson <ninjaaron@gmail.com>"]
 

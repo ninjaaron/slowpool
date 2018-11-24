@@ -9,7 +9,9 @@ import queue
 import shutil
 import time
 import threading
+import typing as t
 
+# a dummy object that signals to kill a thread. see `worker` function
 kill = object()
 
 
@@ -19,25 +21,47 @@ class StillRunning(Exception):
 
 class Future:
     def __init__(self):
-        self.q = queue.Queue(1)
-        self.exception = None
+        """Futures are returned by jobs in the pool. You're not supposed to
+        make thems yourself.
+        """
+        self.q = queue.Queue(1)  # worker thread puts job output here.
+        self.exception = None  # worker thread puts unhandled exceptions here.
 
     def result(self, block=True):
+        """Get the result from the job, if it's ready.
+        
+        If the result is not ready:
+
+        - if block is True, block until the result is available
+        - otherwise, raise a `StillRunning` exception.
+
+        Exceptions not handled in the job will be raised here.
+        """
         try:
             out = self.q.get(block)
         except queue.Empty:
             raise StillRunning("job is still running")
+        else:
+            self.q.join()
+
         if self.exception:
             raise self.exception
         return out
 
 
 def worker(jobs: queue.Queue):
+    """Target function of a worker thread. Loops forever, running jobs
+    until the `kill` object is recieved. This is an implementation
+    detail.
+    """
     while True:
-        item = jobs.get()
-        if item is kill:
+        job = jobs.get()
+        if job is kill:
             return
-        future, fn, args, kwargs = item
+        # This same future is handed to the user in the main thread when
+        # the job is submitted. This is how we synchronise output. and
+        # exception handling.
+        future, fn, args, kwargs = job
         try:
             future.q.put(fn(*args, **kwargs))
         except Exception as e:
@@ -45,8 +69,12 @@ def worker(jobs: queue.Queue):
             future.q.put(None)
 
 
-def yield_complete(futures):
-    """has side effects on the futures list"""
+def yield_complete(futures: t.MutableSequence[Future]):
+    """takes a list of futures.
+    yields results from finished jobs and removes them from the list.
+
+    side effects!
+    """
     prune = []
     for i, future in enumerate(futures):
         try:
@@ -59,12 +87,16 @@ def yield_complete(futures):
 
 
 class Pool:
+    """a thread pool that blocks new jobs when all workers are busy."""
+
     def __init__(self, maxworkers=1):
+        """maxworkers = number of worker threads."""
         self.max = maxworkers
         self.workers = []
         self.jobs = queue.Queue(1)
 
     def submit(self, fn, *args, **kwargs):
+        """submit a new job to the pool. block if workers are busy"""
         if len(self.workers) < self.max:
             thread = threading.Thread(target=worker, args=(self.jobs,))
             thread.start()
@@ -74,10 +106,16 @@ class Pool:
         return future
 
     def map(self, fn, iterable):
+        """map a function to an iterable. runs the functions in the
+        thread pool
+        """
         jobs = [self.submit(fn, item) for item in iterable]
         return (future.result() for future in jobs)
 
     def amap(self, fn, iterable):
+        """map a function to an iterable. results are yielded
+        asynchronously as the are finished.
+        """
         futures = []
         for item in iterable:
             futures.append(self.submit(fn, item))
@@ -86,6 +124,7 @@ class Pool:
             yield from yield_complete(futures)
 
     def empty(self):
+        """stops all worker threads, waiting for them to finish."""
         while self.workers:
             thread = self.workers.pop()
             while thread.is_alive():
@@ -99,23 +138,29 @@ class Pool:
         self.empty()
 
 
+lock = threading.Lock()
+reserved_space = 0.0  # reserved_space in GB
+
+
 def needs_space(func=None, space=0.5):
+    """decorator for job functions which will reserve space on the disk before
+    they run. If there is not enough space, they wait until there is.
+    
+    - space: space to reserve in GiB
+    """
     if func is None:
         return functools.partial(needs_space, space=space)
 
-    lock = threading.Semaphore()
-    reserved_space = 0.0  # reserved_space in GB
-
     def get_space():
         lock.acquire()
-        nonlocal reserved_space
+        global reserved_space
         while reserved_space + 1.5 > shutil.disk_usage(".").free / (1024 ** 3):
             time.sleep(0.3)
         reserved_space += space
         lock.release()
 
     def free_space():
-        nonlocal reserved_space
+        global reserved_space
         reserved_space -= space
 
     @functools.wraps(func)

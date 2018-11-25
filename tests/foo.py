@@ -5,7 +5,7 @@ import time
 
 def rec(n):
     time.sleep(random.random())
-    return 1/n
+    return 1 / n
 
 
 with slowpool.Pool(5) as pool:

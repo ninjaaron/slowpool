@@ -41,8 +41,6 @@ class Future:
             out = self.q.get(block)
         except queue.Empty:
             raise StillRunning("job is still running")
-        else:
-            self.q.join()
 
         if self.exception:
             raise self.exception
@@ -92,7 +90,7 @@ class Pool:
     def __init__(self, maxworkers=1):
         """maxworkers = number of worker threads."""
         self.max = maxworkers
-        self.workers = []
+        self.workers = set()
         self.jobs = queue.Queue(1)
 
     def submit(self, fn, *args, **kwargs):
@@ -100,7 +98,7 @@ class Pool:
         if len(self.workers) < self.max:
             thread = threading.Thread(target=worker, args=(self.jobs,))
             thread.start()
-            self.workers.append(thread)
+            self.workers.add(thread)
         future = Future()
         self.jobs.put((future, fn, args, kwargs))
         return future

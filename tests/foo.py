@@ -8,8 +8,11 @@ def rec(n):
     return 1/n
 
 
-pool = slowpool.Pool(5)
-for output in pool.amap(rec, range(1, 100)):
-    print(output)
+with slowpool.Pool(5) as pool:
+    for output in pool.amap(rec, range(1, 20)):
+        print(output)
 
-pool.empty()
+    print()
+
+    for output in pool.map(rec, range(10, -1, -1)):
+        print(output)

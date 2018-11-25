@@ -89,7 +89,7 @@ class AsyncMap:
     async def __anext__(self):
         while True:
             try:
-                done, pending = await aio.wait(self.tasks, return_when=aio.FIRST_COMPLETED)
+                done, _ = await aio.wait(self.tasks, return_when=aio.FIRST_COMPLETED)
             except ValueError:
                 if self.queuer.done():
                     raise StopAsyncIteration

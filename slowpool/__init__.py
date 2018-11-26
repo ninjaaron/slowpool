@@ -4,6 +4,7 @@ until the job is actually running. I need it because reasons.
 Due to this behavior, Futures can't be cancelled, and there is no need
 to check if they've started. They have.
 """
+import collections
 import functools
 import queue
 import shutil
@@ -46,6 +47,9 @@ class Future:
             raise self.exception
         return out
 
+    def __hash__(self):
+        return id(self)
+
 
 def worker(jobs: queue.Queue):
     """Target function of a worker thread. Loops forever, running jobs
@@ -67,21 +71,22 @@ def worker(jobs: queue.Queue):
             future.q.put(None)
 
 
-def yield_complete(futures: t.MutableSequence[Future]):
-    """takes a list of futures.
+def yield_complete(futures: t.Set[Future]):
+    """takes a set of futures.
     yields results from finished jobs and removes them from the list.
 
     side effects!
     """
     prune = []
-    for i, future in enumerate(futures):
+    for future in futures:
         try:
             yield future.result(False)
-            prune.append(i)
+            prune.append(future)
         except StillRunning:
             pass
-    for i in reversed(prune):
-        del futures[i]
+
+    for future in prune:
+        futures.remove(future)
 
 
 class Pool:
@@ -107,19 +112,28 @@ class Pool:
         """map a function to an iterable. runs the functions in the
         thread pool
         """
-        jobs = [self.submit(fn, item) for item in iterable]
-        return (future.result() for future in jobs)
+        jobs = collections.deque()
+        for item in iterable:
+            jobs.append(self.submit(fn, item))
+            try:
+                yield jobs[0].result(False)
+                jobs.popleft()
+            except StillRunning:
+                pass
+        yield from (future.result() for future in jobs)
 
     def amap(self, fn, iterable):
         """map a function to an iterable. results are yielded
-        asynchronously as the are finished.
+        asynchronously as they are finished.
         """
-        futures = []
+        futures = set()
         for item in iterable:
-            futures.append(self.submit(fn, item))
+            futures.add(self.submit(fn, item))
             yield from yield_complete(futures)
+            time.sleep(0)
         while futures:
             yield from yield_complete(futures)
+            time.sleep(0)
 
     def empty(self):
         """stops all worker threads, waiting for them to finish."""
@@ -127,6 +141,7 @@ class Pool:
             thread = self.workers.pop()
             while thread.is_alive():
                 self.jobs.put(kill)
+                time.sleep(0)
             thread.join()
 
     def __enter__(self):
@@ -143,7 +158,7 @@ reserved_space = 0.0  # reserved_space in GB
 def needs_space(func=None, space=0.5):
     """decorator for job functions which will reserve space on the disk before
     they run. If there is not enough space, they wait until there is.
-   
+
     - space: space to reserve in GiB
     """
     if func is None:
@@ -153,7 +168,7 @@ def needs_space(func=None, space=0.5):
         lock.acquire()
         global reserved_space
         while reserved_space + 1.5 > shutil.disk_usage(".").free / (1024 ** 3):
-            time.sleep(0.3)
+            time.sleep(0.1)
         reserved_space += space
         lock.release()
 

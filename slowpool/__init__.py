@@ -29,7 +29,7 @@ class Future:
 
     def result(self, block=True):
         """Get the result from the job, if it's ready.
-        
+
         If the result is not ready:
 
         - if block is True, block until the result is available
@@ -143,7 +143,7 @@ reserved_space = 0.0  # reserved_space in GB
 def needs_space(func=None, space=0.5):
     """decorator for job functions which will reserve space on the disk before
     they run. If there is not enough space, they wait until there is.
-    
+   
     - space: space to reserve in GiB
     """
     if func is None:

@@ -11,7 +11,7 @@ class Pool:
 
     def __init__(self, maxworkers=1):
         """create a new blocking task pool.
-        
+
         - maxworkers: maximum number simultanious tasks.
         """
         self.max = maxworkers
@@ -23,18 +23,18 @@ class Pool:
         """
         if len(self.tasks) >= self.max:
             _, self.tasks = await aio.wait(self.tasks, return_when=aio.FIRST_COMPLETED)
-        task = aio.spawn(coro)
+        task = aio.create_task(coro)
         self.tasks.add(task)
         return task
 
-    def _map_tasks(self, fn, iterable, taskcallback):
+    def _map_queuer(self, fn, iterable, taskcallback):
         """returns a task that will submit new tasks to the pool by
         mapping function to iterable.
 
         - fn: coroutine function.
         - iterable: iterable that gets mapped to the function
         - taskcallback: after each task is created taskcallback is called
-          on it. taskcallback is an async function. Normally used for 
+          on it. taskcallback is an async function. Normally used for
           sending the task somewhere interesting, like into a queue.
         """
         iterator = iter(iterable)
@@ -47,22 +47,22 @@ class Pool:
                 except StopIteration:
                     return
 
-        return aio.spawn(queueall())
+        return aio.create_task(queueall())
 
     def map(self, fn, iterable):
         """map the coroutine function on to the iterable, submitting
         them as tasks too the pool.
-        
+
         returns an AsyncIterator. Results appear as they become available, but
         in the original order.
         """
         q = aio.Queue()
-        return SyncMap(self._map_tasks(fn, iterable, q.put), q)
+        return SyncMap(self._map_queuer(fn, iterable, q.put), q)
 
     def amap(self, fn, iterable):
         """map the coroutine function on to the iterable, submitting
         them as tasks too the pool.
-        
+
         returns an AsyncIterator. Results appear in the order the finish, not
         in the order they were submitted.
         """
@@ -71,7 +71,7 @@ class Pool:
         async def add(task):
             tasks.add(task)
 
-        return AsyncMap(self._map_tasks(fn, iterable, add), tasks)
+        return AsyncMap(self._map_queuer(fn, iterable, add), tasks)
 
     async def empty(self):
         """wait for all tasks to complete"""
@@ -124,6 +124,7 @@ class AsyncMap:
         while True:
             try:
                 done, _ = await aio.wait(self.tasks, return_when=aio.FIRST_COMPLETED)
+            # raised if self.tasks is empty.
             except ValueError:
                 if self.queuer.done():
                     raise StopAsyncIteration

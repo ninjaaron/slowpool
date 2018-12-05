@@ -14,6 +14,9 @@ import typing as t
 
 # a dummy object that signals to kill a thread. see `worker` function
 kill = object()
+ALL_COMPLETED = 'ALL_COMPLETED'
+FIRST_COMPLETED = 'FIRST_COMPLETED'
+FIRST_EXCEPTION = 'FIRST_EXCEPTION'
 
 
 class StillRunning(Exception):
@@ -47,6 +50,9 @@ class Future:
             raise self.exception
         return out
 
+    def done(self):
+        return self.q.full()
+
     def __hash__(self):
         return id(self)
 
@@ -71,22 +77,72 @@ def worker(jobs: queue.Queue):
             future.q.put(None)
 
 
-def yield_complete(futures: t.Set[Future]):
-    """takes a set of futures.
-    yields results from finished jobs and removes them from the list.
+class Map:
+    __slots__ = 'fn', 'iter', 'pool', 'jobs', 'fin'
 
-    side effects!
-    """
-    prune = []
-    for future in futures:
+    def __init__(self, fn, iterable, pool):
+        self.fn = fn
+        self.iter = iter(iterable)
+        self.pool = pool
+        self.jobs = collections.deque()
+        self.fin = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        while not self.fin:
+            try:
+                item = next(self.iter)
+                self.jobs.append(self.pool.submit(self.fn, item))
+            except StopIteration:
+                self.fin = True
+            future = self.jobs.popleft()
+            try:
+                return future.result(False)
+            except StillRunning:
+                self.jobs.appendleft(future)
         try:
-            yield future.result(False)
-            prune.append(future)
-        except StillRunning:
-            pass
+            return self.jobs.popleft().result()
+        except IndexError:
+            raise StopIteration
 
-    for future in prune:
-        futures.remove(future)
+
+class AsyncMap:
+    __slots__ = 'fn', 'iter', 'pool', 'jobs', 'fin'
+
+    def __init__(self, fn, iterable, pool):
+        self.fn = fn
+        self.iter = iter(iterable)
+        self.pool = pool
+        self.jobs = set()
+        self.fin = False
+
+    __iter__ = Map.__iter__
+
+    def _check_jobs(self):
+        for future in self.jobs:
+            if future.done():
+                self.jobs.remove(future)
+                return future
+
+    def __next__(self):
+        while not self.fin:
+            try:
+                item = next(self.iter)
+                self.jobs.add(self.pool.submit(self.fn, item))
+            except StopIteration:
+                self.fin = True
+            done =  self._check_jobs()
+            if done:
+                return done.result()
+
+        while self.jobs:
+            done =  self._check_jobs()
+            if done:
+                return done.result()
+            time.sleep(0.1)
+        raise StopIteration
 
 
 class Pool:
@@ -112,28 +168,13 @@ class Pool:
         """map a function to an iterable. runs the functions in the
         thread pool
         """
-        jobs = collections.deque()
-        for item in iterable:
-            jobs.append(self.submit(fn, item))
-            try:
-                yield jobs[0].result(False)
-                jobs.popleft()
-            except StillRunning:
-                pass
-        yield from (future.result() for future in jobs)
+        return Map(fn, iterable, self) 
 
     def amap(self, fn, iterable):
         """map a function to an iterable. results are yielded
         asynchronously as they are finished.
         """
-        futures = set()
-        for item in iterable:
-            futures.add(self.submit(fn, item))
-            yield from yield_complete(futures)
-            time.sleep(0)
-        while futures:
-            yield from yield_complete(futures)
-            time.sleep(0)
+        return AsyncMap(fn, iterable, self)
 
     def empty(self):
         """stops all worker threads, waiting for them to finish."""
@@ -141,7 +182,7 @@ class Pool:
             thread = self.workers.pop()
             while thread.is_alive():
                 self.jobs.put(kill)
-                time.sleep(0)
+                time.sleep(0.1)
             thread.join()
 
     def __enter__(self):
@@ -164,24 +205,17 @@ def needs_space(func=None, space=0.5):
     if func is None:
         return functools.partial(needs_space, space=space)
 
-    def get_space():
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
         lock.acquire()
         global reserved_space
         while reserved_space + 1.5 > shutil.disk_usage(".").free / (1024 ** 3):
             time.sleep(0.1)
         reserved_space += space
         lock.release()
-
-    def free_space():
-        global reserved_space
-        reserved_space -= space
-
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        get_space()
         try:
             return func(*args, **kwargs)
         finally:
-            free_space()
+            reserved_space -= space
 
     return wrapper
